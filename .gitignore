@@ -1,0 +1,74 @@
+# ----------------------------------------------------------------------
+# Environment Variables & Secret Store (CRITICAL SECURITY)
+# ----------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ----------------------------------------------------------------------
+# Dependency Management (Composer)
+# ----------------------------------------------------------------------
+/vendor/
+composer.phar
+
+# ----------------------------------------------------------------------
+# Application Logs & Dynamic Storage
+# ----------------------------------------------------------------------
+/logs/*.log
+!/logs/.gitkeep
+/storage/logs/*.log
+/storage/uploads/*
+!/storage/uploads/.gitkeep
+
+# ----------------------------------------------------------------------
+# IDE & Code Editor Files
+# ----------------------------------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# PhpStorm / JetBrains
+.idea/
+*.iws
+*.iml
+
+# Sublime Text / Eclipse
+*.sublime-project
+*.sublime-workspace
+.project
+.settings/
+
+# ----------------------------------------------------------------------
+# Operating System & Server Cache Files
+# ----------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+eh-thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux / Temporary Files
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+
+# ----------------------------------------------------------------------
+# Command Line & Testing Artifacts
+# ----------------------------------------------------------------------
+.phpunit.cache/
+.phpunit.result.cache
+/coverage/
+
+
+
+PROJECT_MANIFEST.md
