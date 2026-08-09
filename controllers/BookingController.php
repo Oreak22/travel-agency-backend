@@ -311,7 +311,7 @@ class BookingController
                         b.id, b.booking_reference, b.user_id, b.seats_booked, b.total_amount, b.status as booking_status, b.created_at,
                         ps.start_date, ps.end_date, ps.price as seat_price,
                         p.id as package_id, p.title as package_title, p.description as package_description, p.duration_days,
-                        d.name as destination_name, d.country as destination_country
+                        d.city as destination_name, d.country as destination_country
                     FROM bookings b
                     JOIN package_schedules ps ON b.schedule_id = ps.id
                     JOIN packages p ON ps.package_id = p.id

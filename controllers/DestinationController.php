@@ -1,13 +1,11 @@
 <?php
 // controllers/DestinationController.php
-
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../helpers/Response.php';
 require_once __DIR__ . '/../middleware/auth.php';
 
 class DestinationController
 {
-
     private $db;
 
     public function __construct()
@@ -17,7 +15,6 @@ class DestinationController
 
     /**
      * GET /api/destinations
-     * Public endpoint to list destinations with optional search and total active package counts
      */
     public function index()
     {
@@ -30,25 +27,26 @@ class DestinationController
         $params = [];
 
         if (!empty($search)) {
-            $whereClauses[] = "(d.name LIKE :search OR d.country LIKE :search)";
+            $whereClauses[] = "(d.city LIKE :search OR d.country LIKE :search OR d.region_tag LIKE :search)";
             $params[':search'] = '%' . $search . '%';
         }
 
         $whereSql = !empty($whereClauses) ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
 
         try {
-            // Count total matching destinations
             $countSql = "SELECT COUNT(*) as total FROM destinations d {$whereSql}";
             $countStmt = $this->db->prepare($countSql);
             $countStmt->execute($params);
-            $totalItems = (int)$countStmt->fetch()['total'];
+            $totalItems = (int)$countStmt->fetch(PDO::FETCH_ASSOC)['total'];
 
-            // Query destinations with active packages count
             $sql = "SELECT 
                         d.id, 
-                        d.name, 
+                        d.city AS name, 
                         d.country, 
+                        d.region_tag AS region,
+                        d.thumbnail_url AS image_url,
                         d.description, 
+                        d.rating,
                         d.created_at,
                         (
                             SELECT COUNT(*) 
@@ -57,7 +55,7 @@ class DestinationController
                         ) as active_packages_count
                     FROM destinations d
                     {$whereSql}
-                    ORDER BY d.name ASC
+                    ORDER BY d.city ASC
                     LIMIT :limit OFFSET :offset";
 
             $stmt = $this->db->prepare($sql);
@@ -69,14 +67,17 @@ class DestinationController
             $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
 
             $stmt->execute();
-            $destinations = $stmt->fetchAll();
+            $destinations = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             $formattedDestinations = array_map(function ($d) {
                 return [
                     'id'                    => (int)$d['id'],
                     'name'                  => $d['name'],
                     'country'               => $d['country'],
+                    'region'                => $d['region'],
+                    'image_url'             => $d['image_url'],
                     'description'           => $d['description'],
+                    'rating'                => (float)$d['rating'],
                     'active_packages_count' => (int)$d['active_packages_count'],
                     'created_at'            => $d['created_at']
                 ];
@@ -94,70 +95,131 @@ class DestinationController
             ]);
         } catch (Exception $e) {
             error_log("Destination Index Exception: " . $e->getMessage());
-            Response::json(500, "Internal Server Error: Unable to fetch destinations.");
+            Response::json(500, "Internal Server Error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * GET /api/destinations/public
+     */
+    public function publicIndex()
+    {
+        try {
+            $region = $_GET['region'] ?? null;
+
+            $sql = "SELECT 
+                        d.id, 
+                        d.city AS name, 
+                        d.country, 
+                        d.region_tag AS region, 
+                        d.description,
+                        d.thumbnail_url AS image_url,
+                        d.rating,
+                        (SELECT COUNT(*) FROM packages p WHERE p.destination_id = d.id) AS package_count
+                    FROM destinations d";
+
+            $params = [];
+            if (!empty($region)) {
+                $sql .= " WHERE d.region_tag = :region";
+                $params[':region'] = $region;
+            }
+
+            $sql .= " ORDER BY d.city ASC";
+
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
+            $destinations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $formatted = array_map(function ($d) {
+                return [
+                    'id'            => (int)$d['id'],
+                    'name'          => $d['name'],
+                    'country'       => $d['country'],
+                    'region'        => $d['region'],
+                    'description'   => $d['description'],
+                    'image_url'     => $d['image_url'] ?? 'assets/images/placeholder-destination.jpg',
+                    'rating'        => (float)($d['rating'] ?? 4.8),
+                    'package_count' => (int)$d['package_count']
+                ];
+            }, $destinations);
+
+            Response::json(200, "Destinations fetched successfully", $formatted);
+        } catch (Exception $e) {
+            error_log("Public Destination Exception: " . $e->getMessage());
+            Response::json(500, "Database Error: " . $e->getMessage());
         }
     }
 
     /**
      * POST /api/admin/destinations
-     * Admin/Agent endpoint to create a new destination
      */
     public function create()
     {
-        // Enforce Role-Based Access Control
-        $currentUser = AuthMiddleware::authenticate(['admin', 'agent']);
-
-        $rawInput = file_get_contents('php://input');
-        $input = json_decode($rawInput, true);
-
-        if (!$input) {
-            Response::json(400, "Invalid JSON payload provided.");
-        }
-
-        $name        = trim($input['name'] ?? '');
-        $country     = trim($input['country'] ?? '');
-        $description = trim($input['description'] ?? '');
-
-        $errors = [];
-        if (empty($name))        $errors['name']        = "Destination name is required.";
-        if (empty($country))     $errors['country']     = "Country is required.";
-        if (empty($description)) $errors['description'] = "Description is required.";
-
-        if (!empty($errors)) {
-            Response::json(422, "Validation failed.", null, $errors);
-        }
-
         try {
-            // Check for existing duplicate destination in the same country
-            $checkStmt = $this->db->prepare("SELECT id FROM destinations WHERE LOWER(name) = LOWER(:name) AND LOWER(country) = LOWER(:country) LIMIT 1");
+            // Validate authentication token
+            $currentUser = AuthMiddleware::authenticate(['admin', 'agent']);
+
+            $rawInput = file_get_contents('php://input');
+            $input = json_decode($rawInput, true);
+
+            if (!$input) {
+                Response::json(400, "Invalid JSON payload provided.");
+                return;
+            }
+
+            $city         = trim($input['name'] ?? $input['city'] ?? '');
+            $country      = trim($input['country'] ?? '');
+            $regionTag    = trim($input['region'] ?? $input['region_tag'] ?? 'General');
+            $thumbnailUrl = trim($input['image_url'] ?? $input['thumbnail_url'] ?? '');
+            $description  = trim($input['description'] ?? '');
+
+            $errors = [];
+            if (empty($city))         $errors['name']          = "City/Destination name is required.";
+            if (empty($country))      $errors['country']       = "Country is required.";
+            if (empty($thumbnailUrl)) $errors['thumbnail_url'] = "Thumbnail URL is required.";
+
+            if (!empty($errors)) {
+                Response::json(422, "Validation failed.", null, $errors);
+                return;
+            }
+
+            // Check for duplicate destination (using schema columns: city & country)
+            $checkStmt = $this->db->prepare("SELECT id FROM destinations WHERE LOWER(city) = LOWER(:city) AND LOWER(country) = LOWER(:country) LIMIT 1");
             $checkStmt->execute([
-                ':name'    => $name,
+                ':city'    => $city,
                 ':country' => $country
             ]);
 
             if ($checkStmt->fetch()) {
-                Response::json(409, "Conflict: Destination '{$name}' in '{$country}' already exists.");
+                Response::json(409, "Conflict: Destination '{$city}' in '{$country}' already exists.");
+                return;
             }
 
-            $sql = "INSERT INTO destinations (name, country, description) VALUES (:name, :country, :description)";
+            $sql = "INSERT INTO destinations (city, country, region_tag, thumbnail_url, description, rating) 
+                    VALUES (:city, :country, :region_tag, :thumbnail_url, :description, 4.80)";
             $stmt = $this->db->prepare($sql);
             $stmt->execute([
-                ':name'        => $name,
-                ':country'     => $country,
-                ':description' => $description
+                ':city'          => $city,
+                ':country'       => $country,
+                ':region_tag'    => $regionTag,
+                ':thumbnail_url' => $thumbnailUrl,
+                ':description'   => $description
             ]);
 
             $destinationId = (int)$this->db->lastInsertId();
 
             Response::json(201, "Destination created successfully.", [
-                'id'          => $destinationId,
-                'name'        => $name,
-                'country'     => $country,
-                'description' => $description
+                'id'            => $destinationId,
+                'name'          => $city,
+                'country'       => $country,
+                'region'        => $regionTag,
+                'image_url'     => $thumbnailUrl,
+                'description'   => $description,
+                'rating'        => 4.80
             ]);
         } catch (Exception $e) {
             error_log("Destination Creation Exception: " . $e->getMessage());
-            Response::json(500, "Internal Server Error: Could not create destination.");
+            Response::json(500, "Internal Server Error: " . $e->getMessage());
         }
     }
 }

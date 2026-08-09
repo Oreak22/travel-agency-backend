@@ -2,11 +2,14 @@
 // index.php - Central REST API Router
 
 // 1. Core Bootstrapping
-require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/config/cors.php';
+require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/config/env.php';
 require_once __DIR__ . '/helpers/Response.php';
-
+ini_set('display_errors', 0);
+ini_set('html_errors', 0);
+ini_set('log_errors', 1);
+error_reporting(E_ALL);
 // Load Environment Variables
 try {
     EnvLoader::load(__DIR__ . '/.env');
@@ -78,8 +81,8 @@ $routes = [
     ['PUT',  '/api/auth/change-password', 'AuthController@changePassword'],
 
     // Email Verification Routes
-    ['GET',  '/api/auth/verify-email',        'AuthController@verifyEmail'],
-    ['POST', '/api/auth/resend-verification', 'AuthController@resendVerification'],
+    ['POST',  '/api/auth/verify-email',        'AuthController@verifyEmail'],
+    ['GET', '/api/auth/resend-verification', 'AuthController@resendVerification'],
 
     // Phase 6: Payment Engine Routes
     ['POST', '/api/payments/initialize',          'PaymentController@initialize'],
@@ -92,6 +95,32 @@ $routes = [
     // Module 7.3: Reviews & Ratings Routes
     ['POST', '/api/reviews',              'ReviewController@create'],
     ['GET',  '/api/packages/{id}/reviews', 'ReviewController@getPackageReviews'],
+
+    // Public Destinations
+    ['GET',    '/api/destinations/public',           'DestinationController@publicIndex'],
+
+    // Admin Analytics
+    ['GET',    '/api/admin/analytics',               'AdminController@analytics'],
+
+    // Admin Bookings
+    ['GET',    '/api/admin/bookings',                'AdminBookingController@index'],
+    ['PUT',    '/api/admin/bookings/status',         'AdminBookingController@updateStatus'],
+    ['GET',    '/api/admin/bookings/verify-paystack', 'AdminBookingController@verifyPaystack'],
+
+    // Admin Media
+    ['GET',    '/api/admin/media',                   'MediaController@index'],
+    ['POST',   '/api/admin/media/upload',            'MediaController@generateSignature'],
+    ['DELETE', '/api/admin/media/delete',            'MediaController@delete'],
+
+    // Admin Settings
+    ['GET',    '/api/admin/settings',                'SettingsController@index'],
+    ['POST',   '/api/admin/settings',                'SettingsController@update'],
+
+    //packages
+    // POST /api/admin/packages/{id}/photos
+    // POST /api/admin/packages/{id}/publish
+    ['POST', '/api/admin/packages/{id}/photos', 'PackageController@uploadPhotos'],
+    ['POST', '/api/admin/packages/{id}/publish', 'PackageController@publishPackage'],
 ];
 
 $routeMatched = false;

@@ -58,12 +58,13 @@ class AuthController
             // Hash password (Bcrypt cost: 12)
             $passwordHash = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
 
-            // Generate Cryptographic Verification Token (24-hour expiration)
-            $token = bin2hex(random_bytes(32));
-            $tokenExpiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
+            // Generate Cryptographic 6-digit OTP (10-minute expiration window)
+            $otp = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            $otpExpiresAt = date('Y-m-d H:i:s', strtotime('+10 minutes'));
 
-            $sql = "INSERT INTO users (full_name, email, password_hash, phone, role, is_email_verified, verification_token, verification_token_expires_at) 
-                    VALUES (:full_name, :email, :password_hash, :phone, 'traveler', 0, :token, :expires_at)";
+            // Insert user using OTP columns
+            $sql = "INSERT INTO users (full_name, email, password_hash, phone, role, is_email_verified, otp, otp_expires_at) 
+                VALUES (:full_name, :email, :password_hash, :phone, 'traveler', 0, :otp, :expires_at)";
 
             $stmt = $this->db->prepare($sql);
             $stmt->execute([
@@ -71,20 +72,17 @@ class AuthController
                 ':email'         => $email,
                 ':password_hash' => $passwordHash,
                 ':phone'         => !empty($phone) ? $phone : null,
-                ':token'         => $token,
-                ':expires_at'    => $tokenExpiresAt
+                ':otp'           => $otp,
+                ':expires_at'    => $otpExpiresAt
             ]);
 
             $userId = (int)$this->db->lastInsertId();
 
-            // Dispatch Verification Email
-            $appUrl = rtrim(getenv('APP_URL') ?: 'http://localhost:8000', '/');
-            $verifyUrl = "{$appUrl}/api/auth/verify-email?token={$token}";
-            $emailHtml = Mailer::getVerificationTemplate($fullName, $verifyUrl);
+            // Dispatch Verification Email with OTP code
+            $emailHtml = Mailer::getOtpVerificationTemplate($fullName, $otp);
+            Mailer::send($email, "Your Verification Code - Travel Agency", $emailHtml);
 
-            Mailer::send($email, "Verify Your Email Address - Travel Agency", $emailHtml);
-
-            Response::json(201, "Registration successful. Please check your email to verify your account.", [
+            Response::json(201, "Registration successful. Please check your email for your verification code.", [
                 'user' => [
                     'id'                => $userId,
                     'full_name'         => $fullName,
@@ -105,38 +103,52 @@ class AuthController
      */
     public function verifyEmail()
     {
-        $token = trim($_GET['token'] ?? '');
+        // Ensure request is strictly POST
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            Response::json(405, "Method Not Allowed. Please use POST.");
+        }
 
-        if (empty($token)) {
-            Response::json(400, "Verification token is required.");
+        // Read and decode JSON request body
+        $rawInput = file_get_contents('php://input');
+        $data = json_decode($rawInput, true);
+
+        $email = trim($data['email'] ?? '');
+        $otp   = trim($data['otp'] ?? '');
+
+        if (empty($email) || empty($otp)) {
+            Response::json(400, "Both 'email' and 'otp' fields are required in the request body.");
         }
 
         try {
-            $sql = "SELECT id, full_name, email, is_email_verified, verification_token_expires_at 
-                    FROM users 
-                    WHERE verification_token = :token LIMIT 1";
+            // Fetch user matching both email and OTP
+            $sql = "SELECT id, full_name, email, is_email_verified, otp_expires_at 
+                FROM users 
+                WHERE email = :email AND otp = :otp LIMIT 1";
 
             $stmt = $this->db->prepare($sql);
-            $stmt->execute([':token' => $token]);
+            $stmt->execute([
+                ':email' => $email,
+                ':otp'   => $otp
+            ]);
             $user = $stmt->fetch();
 
             if (!$user) {
-                Response::json(404, "Invalid or expired verification token.");
+                Response::json(400, "Invalid OTP or email address.");
             }
 
             if ((int)$user['is_email_verified'] === 1) {
                 Response::json(200, "Email address is already verified.");
             }
 
-            // Check token expiration
-            if (strtotime($user['verification_token_expires_at']) < time()) {
-                Response::json(410, "Verification link has expired. Please request a new verification email.");
+            // Check OTP expiration
+            if (strtotime($user['otp_expires_at']) < time()) {
+                Response::json(410, "OTP has expired. Please request a new verification code.");
             }
 
-            // Activate user account
+            // Activate user account & clear consumed OTP
             $updateSql = "UPDATE users 
-                          SET is_email_verified = 1, verification_token = NULL, verification_token_expires_at = NULL 
-                          WHERE id = :id";
+                      SET is_email_verified = 1, otp = NULL, otp_expires_at = NULL 
+                      WHERE id = :id";
             $updateStmt = $this->db->prepare($updateSql);
             $updateStmt->execute([':id' => $user['id']]);
 
@@ -153,52 +165,135 @@ class AuthController
      * POST /api/auth/resend-verification
      * Issue new verification token and email to unverified accounts
      */
+    private function enforceRateLimit(string $identifier, int $cooldownSeconds = 60, int $maxAttempts = 3, int $decaySeconds = 3600)
+    {
+        $now = date('Y-m-d H:i:s');
+
+        $stmt = $this->db->prepare("
+        SELECT id, attempts, last_attempt_at, created_at 
+        FROM otp_rate_limits 
+        WHERE identifier = :identifier AND action_type = 'resend_otp' 
+        LIMIT 1
+    ");
+        $stmt->execute([':identifier' => $identifier]);
+        $record = $stmt->fetch();
+
+        if ($record) {
+            $lastAttemptTime = strtotime($record['last_attempt_at']);
+            $createdTime     = strtotime($record['created_at']);
+            $elapsedCooldown = time() - $lastAttemptTime;
+            $elapsedWindow   = time() - $createdTime;
+
+            if ($elapsedCooldown < $cooldownSeconds) {
+                $waitTime = $cooldownSeconds - $elapsedCooldown;
+                throw new Exception("Please wait {$waitTime} second(s) before requesting another code.", 429);
+            }
+
+            if ($elapsedWindow > $decaySeconds) {
+                // FIXED: Unique placeholders for each value
+                $resetStmt = $this->db->prepare("
+                UPDATE otp_rate_limits 
+                SET attempts = 1, last_attempt_at = :last_attempt_at, created_at = :created_at 
+                WHERE id = :id
+            ");
+                $resetStmt->execute([
+                    ':last_attempt_at' => $now,
+                    ':created_at'      => $now,
+                    ':id'              => $record['id']
+                ]);
+                return;
+            }
+
+            if ((int)$record['attempts'] >= $maxAttempts) {
+                $timeRemaining = ceil(($decaySeconds - $elapsedWindow) / 60);
+                throw new Exception("Too many attempts. Please try again in {$timeRemaining} minute(s).", 429);
+            }
+
+            $updateStmt = $this->db->prepare("
+            UPDATE otp_rate_limits 
+            SET attempts = attempts + 1, last_attempt_at = :last_attempt_at 
+            WHERE id = :id
+        ");
+            $updateStmt->execute([
+                ':last_attempt_at' => $now,
+                ':id'              => $record['id']
+            ]);
+        } else {
+            // FIXED: Unique placeholders for each value
+            $insertStmt = $this->db->prepare("
+            INSERT INTO otp_rate_limits (identifier, action_type, attempts, last_attempt_at, created_at) 
+            VALUES (:identifier, 'resend_otp', 1, :last_attempt_at, :created_at)
+        ");
+            $insertStmt->execute([
+                ':identifier'      => $identifier,
+                ':last_attempt_at' => $now,
+                ':created_at'      => $now
+            ]);
+        }
+    }
     public function resendVerification()
     {
-        $rawInput = file_get_contents('php://input');
-        $input = json_decode($rawInput, true);
-
-        $email = strtolower(trim($input['email'] ?? ''));
+        // $rawInput = file_get_contents('php://input');
+        // $input = json_decode($rawInput, true);
+        // Read email from $_GET parameter instead of JSON body
+        $email = strtolower(trim($_GET['email'] ?? ''));
 
         if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             Response::json(422, "Validation Error: A valid email address is required.");
+            return;
         }
 
+
+
+
         try {
+            // Enforce Rate Limit: 60s cooldown, max 3 attempts per hour per email
+            $this->enforceRateLimit($email, 60, 3, 3600);
+
             $stmt = $this->db->prepare("SELECT id, full_name, is_email_verified FROM users WHERE email = :email LIMIT 1");
             $stmt->execute([':email' => $email]);
             $user = $stmt->fetch();
 
             if (!$user) {
                 // Prevent email enumeration
-                Response::json(200, "If an unverified account matches that email, a verification link has been sent.");
+                Response::json(200, "If an unverified account matches that email, a verification code has been sent.");
+                return;
             }
 
             if ((int)$user['is_email_verified'] === 1) {
                 Response::json(409, "This account is already verified.");
+                return;
             }
 
-            // Regenerate Token
-            $newToken = bin2hex(random_bytes(32));
-            $tokenExpiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
+            // 1. Regenerate Secure 6-Digit OTP (10-minute expiration)
+            $newOtp       = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+            $otpExpiresAt = date('Y-m-d H:i:s', strtotime('+10 minutes'));
 
-            $updateStmt = $this->db->prepare("UPDATE users SET verification_token = :token, verification_token_expires_at = :expires_at WHERE id = :id");
+            // 2. Query with matching named placeholders
+            $updateStmt = $this->db->prepare("UPDATE users SET otp = :otp, otp_expires_at = :otp_expires_at WHERE id = :id");
+
+            // 3. Array keys MUST match placeholders word-for-word
             $updateStmt->execute([
-                ':token'      => $newToken,
-                ':expires_at' => $tokenExpiresAt,
-                ':id'         => $user['id']
+                ':otp'            => $newOtp,
+                ':otp_expires_at' => $otpExpiresAt, // <-- Make sure this key matches :otp_expires_at above
+                ':id'             => $user['id']
             ]);
 
-            $appUrl = rtrim(getenv('APP_URL') ?: 'http://localhost:8000', '/');
-            $verifyUrl = "{$appUrl}/api/auth/verify-email?token={$newToken}";
-            $emailHtml = Mailer::getVerificationTemplate($user['full_name'], $verifyUrl);
+            // Dispatch active mailer template
+            $emailHtml = Mailer::getOtpVerificationTemplate($user['full_name'], $newOtp);
+            Mailer::send($email, "New Email Verification Code - Travel Agency", $emailHtml);
 
-            Mailer::send($email, "New Email Verification Link - Travel Agency", $emailHtml);
+            Response::json(200, "A fresh email verification code has been sent.");
+            return;
+        } catch (Throwable $e) {
+            if ((int)$e->getCode() === 429 || str_contains($e->getMessage(), 'Rate limit')) {
+                Response::json(429, $e->getMessage());
+                return;
+            }
 
-            Response::json(200, "A fresh email verification link has been sent.");
-        } catch (Exception $e) {
-            error_log("Resend Verification Exception: " . $e->getMessage());
-            Response::json(500, "Internal Server Error: Unable to resend verification email.");
+            // DEBUG OUTPUT: Displays exact error details in Postman response
+            Response::json(500, "DEBUG: " . $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine());
+            return;
         }
     }
     /**
@@ -225,7 +320,7 @@ class AuthController
 
         try {
             // Fetch User by Email
-            $stmt = $this->db->prepare("SELECT id, full_name, email, password_hash, phone, role FROM users WHERE email = :email LIMIT 1");
+            $stmt = $this->db->prepare("SELECT id, full_name, email, password_hash, phone, role,is_email_verified FROM users WHERE email = :email LIMIT 1");
             $stmt->execute([':email' => $email]);
             $user = $stmt->fetch();
 
@@ -251,7 +346,8 @@ class AuthController
                     'full_name' => $user['full_name'],
                     'email'     => $user['email'],
                     'phone'     => $user['phone'],
-                    'role'      => $user['role']
+                    'role'      => $user['role'],
+                    'is_email_verified' => (int) $user['is_email_verified']
                 ],
                 'token' => $token
             ]);
@@ -271,7 +367,7 @@ class AuthController
         $currentUser = AuthMiddleware::authenticate();
 
         try {
-            $stmt = $this->db->prepare("SELECT id, full_name, email, phone, role, created_at FROM users WHERE id = :id LIMIT 1");
+            $stmt = $this->db->prepare("SELECT id, full_name, email, phone, role, created_at, is_email_verified FROM users WHERE id = :id LIMIT 1");
             $stmt->execute([':id' => $currentUser['sub']]);
             $user = $stmt->fetch();
 
@@ -286,7 +382,7 @@ class AuthController
                     'email'      => $user['email'],
                     'phone'      => $user['phone'],
                     'role'       => $user['role'],
-                    'created_at' => $user['created_at']
+                    'is_email_verified' => (int) $user['is_email_verified']
                 ]
             ]);
         } catch (Exception $e) {

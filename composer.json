@@ -1,5 +1,13 @@
 {
     "require": {
-        "firebase/php-jwt": "^7.1"
+        "firebase/php-jwt": "^7.1",
+        "mailgun/mailgun-php": "^4.5",
+        "symfony/http-client": "^7.4",
+        "nyholm/psr7": "^1.8"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
     }
 }

@@ -90,7 +90,7 @@ class AdminController
             $topDestStmt = $this->db->query("
                 SELECT 
                     d.id, 
-                    d.name, 
+                    d.city AS name, 
                     d.country, 
                     COUNT(b.id) as total_bookings
                 FROM destinations d
@@ -98,7 +98,7 @@ class AdminController
                 JOIN package_schedules ps ON ps.package_id = p.id
                 JOIN bookings b ON b.schedule_id = ps.id
                 WHERE b.status = 'confirmed'
-                GROUP BY d.id, d.name, d.country
+                GROUP BY d.id, d.city, d.country
                 ORDER BY total_bookings DESC
                 LIMIT 5
             ");
@@ -141,5 +141,47 @@ class AdminController
             error_log("Admin Stats Exception: " . $e->getMessage());
             Response::json(500, "Internal Server Error: Unable to fetch dashboard analytics.");
         }
+    }
+    public function analytics()
+    {
+        // 1. Gross Revenue
+        $revStmt = $this->db->query("SELECT COALESCE(SUM(amount), 0) AS gross_revenue FROM payments WHERE status = 'completed'");
+        $grossRevenue = (float)$revStmt->fetchColumn();
+
+        // 2. Month-over-Month Booking Growth
+        $currentMonthStmt = $this->db->query("SELECT COUNT(*) FROM bookings WHERE MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE())");
+        $currentMonthBookings = (int)$currentMonthStmt->fetchColumn();
+
+        $lastMonthStmt = $this->db->query("SELECT COUNT(*) FROM bookings WHERE MONTH(created_at) = MONTH(CURRENT_DATE() - INTERVAL 1 MONTH) AND YEAR(created_at) = YEAR(CURRENT_DATE() - INTERVAL 1 MONTH)");
+        $lastMonthBookings = (int)$lastMonthStmt->fetchColumn();
+
+        $growthRate = 0;
+        if ($lastMonthBookings > 0) {
+            $growthRate = (($currentMonthBookings - $lastMonthBookings) / $lastMonthBookings) * 100;
+        } else if ($currentMonthBookings > 0) {
+            $growthRate = 100;
+        }
+
+        // 3. Payment Ratios
+        $ratioStmt = $this->db->query("
+            SELECT status, COUNT(*) as total 
+            FROM payments 
+            GROUP BY status
+        ");
+        $paymentStats = $ratioStmt->fetchAll(PDO::FETCH_KEY_PAIR);
+
+        Response::json(200, "Analytics retrieved successfully", [
+            'gross_revenue' => $grossRevenue,
+            'booking_growth' => [
+                'current_month' => $currentMonthBookings,
+                'last_month' => $lastMonthBookings,
+                'growth_percentage' => round($growthRate, 2)
+            ],
+            'payment_ratios' => [
+                'completed' => (int)($paymentStats['completed'] ?? 0),
+                'pending'   => (int)($paymentStats['pending'] ?? 0),
+                'failed'    => (int)($paymentStats['failed'] ?? 0)
+            ]
+        ]);
     }
 }

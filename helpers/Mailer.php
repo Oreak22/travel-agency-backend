@@ -1,6 +1,8 @@
 <?php
 // helpers/Mailer.php
 
+use Mailgun\Mailgun;
+
 class Mailer
 {
 
@@ -14,7 +16,7 @@ class Mailer
      */
     public static function send($toRecipient, $subject, $htmlBody)
     {
-        $driver      = strtolower(getenv('MAIL_DRIVER') ?: 'log');
+        $driver      = strtolower(getenv('MAIL_DRIVER'));
         $fromAddress = getenv('MAIL_FROM_ADDRESS') ?: 'noreply@travelagency.com';
         $fromName    = getenv('MAIL_FROM_NAME') ?: 'Travel Agency';
 
@@ -53,6 +55,8 @@ class Mailer
 
         $apiUrl = 'https://api.sendgrid.com/v3/mail/send';
 
+        $plainText = strip_tags(str_replace(['<br>', '<br/>', '<br />'], "\n", $htmlContent));
+
         $payload = [
             'personalizations' => [
                 [
@@ -66,6 +70,10 @@ class Mailer
             'subject' => $subject,
             'content' => [
                 [
+                    'type'  => 'text/plain',
+                    'value' => $plainText
+                ],
+                [
                     'type'  => 'text/html',
                     'value' => $htmlContent
                 ]
@@ -77,16 +85,23 @@ class Mailer
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Authorization: Bearer ' . $apiKey,
             'Content-Type: application/json'
         ]);
 
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $response  = curl_exec($ch);
+        $httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
         curl_close($ch);
 
-        // SendGrid returns HTTP 202 Accepted on success
+        if ($response === false) {
+            error_log("SendGrid cURL Error: " . $curlError);
+            return false;
+        }
+
         if ($httpCode === 202 || $httpCode === 200) {
             return true;
         }
@@ -98,6 +113,7 @@ class Mailer
     /**
      * Send email via Mailgun Messages API
      */
+
     private static function sendViaMailgun($to, $subject, $htmlContent, $fromEmail, $fromName)
     {
         $apiKey = getenv('MAILGUN_API_KEY');
@@ -108,8 +124,10 @@ class Mailer
             return false;
         }
 
+        // Standard US region endpoint; use https://api.eu.mailgun.net/v3/{$domain}/messages for EU domains
         $apiUrl = "https://api.mailgun.net/v3/{$domain}/messages";
 
+        // Pass the raw array directly (DO NOT use http_build_query)
         $postFields = [
             'from'    => "{$fromName} <{$fromEmail}>",
             'to'      => $to,
@@ -120,13 +138,21 @@ class Mailer
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $apiUrl);
         curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postFields));
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields); // Sends multipart/form-data
         curl_setopt($ch, CURLOPT_USERPWD, 'api:' . $apiKey);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
         curl_close($ch);
+
+        if ($response === false) {
+            error_log("Mailgun cURL Network Error: " . $curlError);
+            return false;
+        }
 
         if ($httpCode === 200) {
             return true;
@@ -137,39 +163,95 @@ class Mailer
     }
 
     /**
-     * Render Template: Email Verification Link
+     * Generates a responsive HTML template for OTP verification emails.
+     *
+     * @param string $fullName The recipient's full name.
+     * @param string $otp      The 6-digit verification code.
+     * @return string          Rendered HTML body.
      */
-    public static function getVerificationTemplate($fullName, $verificationUrl)
+    public static function getOtpVerificationTemplate(string $fullName, string $otp): string
     {
-        $name = htmlspecialchars($fullName, ENT_QUOTES, 'UTF-8');
-        $url  = htmlspecialchars($verificationUrl, ENT_QUOTES, 'UTF-8');
+        $safeName = htmlspecialchars($fullName, ENT_QUOTES, 'UTF-8');
+        $safeOtp  = htmlspecialchars($otp, ENT_QUOTES, 'UTF-8');
 
-        return "
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body { font-family: Arial, sans-serif; background-color: #f4f6f8; color: #333; margin: 0; padding: 20px; }
-                .container { max-width: 600px; margin: 0 auto; background: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-                .btn { display: inline-block; padding: 12px 24px; background-color: #2563eb; color: #ffffff !important; text-decoration: none; border-radius: 6px; font-weight: bold; margin-top: 20px; }
-                .footer { font-size: 12px; color: #6b7280; margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 15px; }
-            </style>
-        </head>
-        <body>
-            <div class='container'>
-                <h2>Welcome to Travel Agency, {$name}!</h2>
-                <p>Thank you for registering. Please confirm your email address by clicking the button below:</p>
-                <a href='{$url}' class='btn' target='_blank'>Verify Email Address</a>
-                <p style='margin-top: 25px;'>If the button above does not work, copy and paste this link into your browser:</p>
-                <p><a href='{$url}'>{$url}</a></p>
-                <p><strong>Note:</strong> This verification link will expire in 24 hours.</p>
-                <div class='footer'>
-                    <p>If you did not create an account, please ignore this email.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        ";
+        // Formatted version with letter-spacing spacing out digits
+        $formattedOtp = implode('&nbsp;&nbsp;', str_split($safeOtp));
+
+        return <<<HTML
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Encoding" content="IE=edge">
+    <title>Your Verification Code</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f6f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="table-layout: fixed;">
+        <tr>
+            <td align="center" style="padding: 40px 10px; background-color: #f4f6f9;">
+                
+                <!-- Main Card Container -->
+                <table border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width: 520px; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); border: 1px solid #e5e7eb;">
+                    
+                    <!-- Header Bar -->
+                    <tr>
+                        <td align="center" style="padding: 32px 32px 16px 32px; background-color: #ffffff; border-bottom: 1px solid #f3f4f6;">
+                            <h1 style="margin: 0; font-size: 22px; font-weight: 700; color: #111827; letter-spacing: -0.5px;">
+                                Travel Agency
+                            </h1>
+                        </td>
+                    </tr>
+
+                    <!-- Body Content -->
+                    <tr>
+                        <td style="padding: 32px; text-align: left;">
+                            <h2 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 600; color: #111827;">
+                                Verify Your Email Address
+                            </h2>
+                            <p style="margin: 0 0 24px 0; font-size: 15px; line-height: 1.5; color: #4b5563;">
+                                Hi {$safeName},
+                            </p>
+                            <p style="margin: 0 0 28px 0; font-size: 15px; line-height: 1.5; color: #4b5563;">
+                                Thank you for registering. Please use the verification code below to complete your registration. This code will expire in <strong>10 minutes</strong>.
+                            </p>
+
+                            <!-- OTP Box -->
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                                <tr>
+                                    <td align="center" style="padding: 20px; background-color: #f8fafc; border-radius: 8px; border: 1px dashed #cbd5e1;">
+                                        <span style="font-family: 'Courier New', Courier, monospace; font-size: 32px; font-weight: 700; color: #2563eb; letter-spacing: 6px; display: inline-block;">
+                                            {$safeOtp}
+                                        </span>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p style="margin: 28px 0 0 0; font-size: 13px; line-height: 1.5; color: #6b7280;">
+                                If you did not create an account or request this code, you can safely ignore this email.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td align="center" style="padding: 20px 32px; background-color: #f9fafb; border-top: 1px solid #f3f4f6;">
+                            <p style="margin: 0; font-size: 12px; color: #9ca3af; line-height: 1.4;">
+                                &copy; " . date('Y') . " Travel Agency. All rights reserved.<br>
+                                This is an automated message, please do not reply to this email.
+                            </p>
+                        </td>
+                    </tr>
+
+                </table>
+                <!-- End Main Card -->
+
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+HTML;
     }
 
     /**
