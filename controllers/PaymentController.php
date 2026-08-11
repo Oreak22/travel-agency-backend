@@ -86,16 +86,19 @@ class PaymentController
             $transactionRef = 'TRX-' . strtoupper(bin2hex(random_bytes(8)));
             $amountKobo     = (int)round((float)$booking['total_amount'] * 100);
 
-            // Construct valid absolute callback URL for frontend redirect
-            $baseUrl = rtrim(getenv('APP_URL') ?: 'http://localhost:4200/my-bookings', '');
-            $defaultCallback = $baseUrl . '/payment/confirm?reference=' . $transactionRef;
+            // Construct valid absolute redirect URL for post-payment redirect using APP_URL
+            $appUrl = getenv('APP_URL') ?: getenv('FRONTEND_URL') ?: 'http://localhost:4200';
+            $defaultCallback = rtrim($appUrl, '/') . '/my-bookings';
+
+            // Paystack automatically appends ?trxref=...&reference=... upon completion
+            $finalCallbackUrl = !empty($callbackUrl) ? $callbackUrl : $defaultCallback;
 
             // 3. Prepare Paystack Gateway API Payload
             $payload = [
                 'email'        => $booking['email'],
                 'amount'       => $amountKobo,
                 'reference'    => $transactionRef,
-                'callback_url' => !empty($callbackUrl) ? $callbackUrl : $defaultCallback,
+                'callback_url' => $finalCallbackUrl,
                 'metadata'     => [
                     'booking_id' => $bookingId,
                     'user_id'    => $userId
