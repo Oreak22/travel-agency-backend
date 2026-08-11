@@ -69,4 +69,34 @@ class JWT
             throw new Exception("Authentication failure: " . $e->getMessage());
         }
     }
+
+    public static function generateTicketJwt(array $booking): string
+    {
+        $secretKey = $_ENV['JWT_SECRET'] ?? 'your-secret-key-change-this';
+
+        $header = json_encode([
+            'alg' => 'HS256',
+            'typ' => 'JWT'
+        ]);
+
+        // Ticket payload containing essential verify attributes
+        $payload = json_encode([
+            'iss' => 'Journey2gether',
+            'sub' => (int)$booking['id'],
+            'ref' => $booking['booking_reference'],
+            'pkg' => $booking['package_title'],
+            'seats' => (int)$booking['seats_booked'],
+            'status' => $booking['booking_status'],
+            'iat' => time(),
+            'exp' => time() + (30 * 24 * 60 * 60) // Ticket token valid for 30 days
+        ]);
+
+        $base64UrlHeader  = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($header));
+        $base64UrlPayload = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($payload));
+
+        $signature = hash_hmac('sha256', $base64UrlHeader . "." . $base64UrlPayload, $secretKey, true);
+        $base64UrlSignature = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($signature));
+
+        return $base64UrlHeader . "." . $base64UrlPayload . "." . $base64UrlSignature;
+    }
 }

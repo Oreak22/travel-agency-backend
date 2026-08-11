@@ -78,6 +78,7 @@ class DestinationController
                     'image_url'             => $d['image_url'],
                     'description'           => $d['description'],
                     'rating'                => (float)$d['rating'],
+                    'package_count'         => (int)$d['active_packages_count'], // Added alias
                     'active_packages_count' => (int)$d['active_packages_count'],
                     'created_at'            => $d['created_at']
                 ];

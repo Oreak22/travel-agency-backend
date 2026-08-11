@@ -18,10 +18,15 @@ class PackageController
      * GET /api/packages
      * Fetch paginated list of active tour packages
      */
+    /**
+     * GET /api/packages
+     * Fetch paginated list of packages (with optional status filtering)
+     */
     public function index()
     {
         $destinationId = isset($_GET['destination_id']) ? (int)$_GET['destination_id'] : null;
         $search        = isset($_GET['search']) ? trim($_GET['search']) : null;
+        $status        = isset($_GET['status']) ? trim($_GET['status']) : null;
         $min_price     = isset($_GET['min_price']) ? (float)$_GET['min_price'] : null;
         $max_price     = isset($_GET['max_price']) ? (float)$_GET['max_price'] : null;
 
@@ -29,8 +34,14 @@ class PackageController
         $limit  = isset($_GET['limit']) ? min(50, max(1, (int)$_GET['limit'])) : 10;
         $offset = ($page - 1) * $limit;
 
-        $whereClauses = ["p.status = 'active'"];
+        $whereClauses = ["1=1"];
         $params = [];
+
+        // If status filter is passed, use it; otherwise allow all statuses for admin views
+        if ($status) {
+            $whereClauses[] = "p.status = :status";
+            $params[':status'] = $status;
+        }
 
         if ($destinationId) {
             $whereClauses[] = "p.destination_id = :destination_id";
@@ -72,6 +83,7 @@ class PackageController
                         p.description, 
                         p.base_price, 
                         p.duration_days, 
+                        p.status,
                         d.id as destination_id, 
                         d.city as destination_name, 
                         d.country as destination_country,
@@ -104,6 +116,7 @@ class PackageController
                     'description'   => $item['description'],
                     'base_price'    => (float)$item['base_price'],
                     'duration_days' => (int)$item['duration_days'],
+                    'status'        => $item['status'],
                     'destination'   => [
                         'id'      => (int)$item['destination_id'],
                         'name'    => $item['destination_name'],
@@ -458,26 +471,53 @@ class PackageController
      * Step 4a: Attach a cover or gallery photo to a package
      * Protected: Admin/Agent only
      */
-    public function addPhoto($packageId)
+    /**
+     * POST /api/admin/packages/{id}/photos
+     * Attach a photo to a package via direct file upload (Cloudinary) or raw image URL
+     * Protected: Admin/Agent only
+     */
+    public function addPhotos($packageId)
     {
+        require_once __DIR__ . '/../helpers/Cloudinary.php';
+
         $currentUser = AuthMiddleware::authenticate(['admin', 'agent']);
         $packageId = (int)$packageId;
 
-        $rawInput = file_get_contents('php://input');
-        $input = json_decode($rawInput, true);
+        // Initialize defaults
+        $photoUrl = null;
+        $publicId = null;
+        $photoType = $_POST['photo_type'] ?? 'cover'; // 'cover', 'marketing', or 'gallery'
+        $caption   = trim($_POST['caption'] ?? '');
 
-        if (!$input) {
-            Response::json(400, "Invalid JSON payload provided.");
-            return;
+        // 1. Direct Binary File Upload via $_FILES (multipart/form-data)
+        if (isset($_FILES['photo']) && $_FILES['photo']['error'] === UPLOAD_ERR_OK) {
+            $tmpFilePath = $_FILES['photo']['tmp_name'];
+
+            try {
+                // Upload temporary binary file to Cloudinary
+                $uploadResult = CloudinaryHelper::upload($tmpFilePath, 'packages');
+                $photoUrl = $uploadResult['secure_url'];
+                $publicId = $uploadResult['public_id'];
+            } catch (Exception $e) {
+                error_log("Cloudinary Upload Error: " . $e->getMessage());
+                Response::json(500, "Image upload failed: " . $e->getMessage());
+                return;
+            }
+        }
+        // 2. Fallback: Parse raw JSON input body for pre-uploaded photo_url
+        else {
+            $rawInput = file_get_contents('php://input');
+            $input = json_decode($rawInput, true) ?? [];
+
+            $photoUrl  = trim($input['photo_url'] ?? $input['file_url'] ?? $input['image_url'] ?? '');
+            $photoType = trim($input['photo_type'] ?? $photoType);
+            $caption   = trim($input['caption'] ?? $caption);
+            $publicId  = trim($input['cloudinary_public_id'] ?? $input['public_id'] ?? '');
         }
 
-        $photoUrl   = trim($input['photo_url'] ?? $input['file_url'] ?? $input['image_url'] ?? '');
-        $photoType  = trim($input['photo_type'] ?? 'cover'); // 'cover', 'marketing', or 'gallery'
-        $caption    = trim($input['caption'] ?? '');
-        $publicId   = trim($input['cloudinary_public_id'] ?? $input['public_id'] ?? '');
-
+        // Validation
         if (empty($photoUrl)) {
-            Response::json(422, "Validation failed.", null, ['photo_url' => "Image URL is required."]);
+            Response::json(422, "Validation failed.", null, ['photo' => "An image file or valid photo_url is required."]);
             return;
         }
 
@@ -490,7 +530,7 @@ class PackageController
                 return;
             }
 
-            // If photo_type is 'cover', demote any previous cover photos for this package to 'gallery'
+            // If photo_type is 'cover', demote previous cover photos for this package to 'gallery'
             if ($photoType === 'cover') {
                 $demoteStmt = $this->db->prepare("UPDATE package_photos SET photo_type = 'gallery' WHERE package_id = :package_id AND photo_type = 'cover'");
                 $demoteStmt->execute([':package_id' => $packageId]);
@@ -512,17 +552,164 @@ class PackageController
             $photoId = (int)$this->db->lastInsertId();
 
             Response::json(201, "Package photo added successfully.", [
-                'id'         => $photoId,
-                'package_id' => $packageId,
-                'photo_url'  => $photoUrl,
-                'photo_type' => $photoType
+                'id'                   => $photoId,
+                'package_id'           => $packageId,
+                'photo_url'            => $photoUrl,
+                'cloudinary_public_id' => $publicId,
+                'photo_type'           => $photoType
             ]);
         } catch (Exception $e) {
             error_log("Photo Add Exception: " . $e->getMessage());
             Response::json(500, "Internal Server Error: " . $e->getMessage());
         }
     }
+    /**
+     * PUT /api/admin/packages/{id}
+     * Update basic package details
+     */
+    public function updatePackage($id)
+    {
+        $currentUser = AuthMiddleware::authenticate(['admin', 'agent']);
+        $packageId = (int)$id;
 
+        $rawInput = file_get_contents('php://input');
+        $input = json_decode($rawInput, true);
+
+        if (!$input) {
+            Response::json(400, "Invalid JSON payload provided.");
+            return;
+        }
+
+        try {
+            $pkgStmt = $this->db->prepare("SELECT id FROM packages WHERE id = :id LIMIT 1");
+            $pkgStmt->execute([':id' => $packageId]);
+            if (!$pkgStmt->fetch()) {
+                Response::json(404, "Package not found.");
+                return;
+            }
+
+            $destinationId = (int)($input['destination_id'] ?? 0);
+            $title         = trim($input['title'] ?? '');
+            $description   = trim($input['description'] ?? '');
+            $basePrice     = (float)($input['base_price'] ?? $input['basePrice'] ?? 0);
+            $durationDays  = (int)($input['duration_days'] ?? 0);
+
+            $errors = [];
+            if ($destinationId <= 0) $errors['destination_id'] = "A valid destination ID is required.";
+            if (empty($title))        $errors['title']          = "Package title is required.";
+            if (empty($description))  $errors['description']    = "Package description is required.";
+            if ($basePrice <= 0)      $errors['base_price']     = "Base price must be greater than zero.";
+            if ($durationDays <= 0)   $errors['duration_days']  = "Duration days must be at least 1.";
+
+            if (!empty($errors)) {
+                Response::json(422, "Validation failed.", null, $errors);
+                return;
+            }
+
+            $sql = "UPDATE packages 
+                    SET destination_id = :destination_id, 
+                        title = :title, 
+                        description = :description, 
+                        base_price = :base_price, 
+                        duration_days = :duration_days, 
+                        updated_at = NOW() 
+                    WHERE id = :id";
+
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([
+                ':destination_id' => $destinationId,
+                ':title'          => $title,
+                ':description'    => $description,
+                ':base_price'     => $basePrice,
+                ':duration_days'  => $durationDays,
+                ':id'             => $packageId
+            ]);
+
+            Response::json(200, "Package updated successfully.");
+        } catch (Exception $e) {
+            error_log("Package Update Error: " . $e->getMessage());
+            Response::json(500, "Internal Server Error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * PATCH /api/admin/packages/{id}/status
+     * Update package status (active, inactive, draft, archived)
+     */
+    public function updateStatus($id)
+    {
+        $currentUser = AuthMiddleware::authenticate(['admin', 'agent']);
+        $packageId = (int)$id;
+
+        $rawInput = file_get_contents('php://input');
+        $input = json_decode($rawInput, true);
+
+        $status = trim($input['status'] ?? '');
+        $allowedStatuses = ['active', 'inactive', 'draft', 'archived'];
+
+        if (!in_array($status, $allowedStatuses, true)) {
+            Response::json(422, "Invalid status provided. Must be active, inactive, draft, or archived.");
+            return;
+        }
+
+        try {
+            $stmt = $this->db->prepare("UPDATE packages SET status = :status, updated_at = NOW() WHERE id = :id");
+            $stmt->execute([':status' => $status, ':id' => $packageId]);
+
+            if ($stmt->rowCount() === 0) {
+                Response::json(404, "Package not found or status unchanged.");
+                return;
+            }
+
+            Response::json(200, "Package status updated to '{$status}'.");
+        } catch (Exception $e) {
+            error_log("Status Update Error: " . $e->getMessage());
+            Response::json(500, "Internal Server Error: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * DELETE /api/admin/packages/{id}
+     * Remove or soft-archive a package
+     */
+    public function deletePackage($id)
+    {
+        $currentUser = AuthMiddleware::authenticate(['admin']);
+        $packageId = (int)$id;
+
+        try {
+            // Check if active bookings exist on any schedules for this package
+            $checkSql = "SELECT COUNT(*) as active_bookings 
+                         FROM bookings b 
+                         JOIN package_schedules ps ON b.schedule_id = ps.id 
+                         WHERE ps.package_id = :package_id AND b.status IN ('pending', 'confirmed')";
+            $checkStmt = $this->db->prepare($checkSql);
+            $checkStmt->execute([':package_id' => $packageId]);
+            $hasBookings = (int)$checkStmt->fetch(PDO::FETCH_ASSOC)['active_bookings'] > 0;
+
+            if ($hasBookings) {
+                // Perform a soft delete by marking as archived to protect booking integrity
+                $archiveStmt = $this->db->prepare("UPDATE packages SET status = 'archived' WHERE id = :id");
+                $archiveStmt->execute([':id' => $packageId]);
+                Response::json(200, "Package has active bookings and was archived instead of deleted.");
+                return;
+            }
+
+            // Perform hard delete if safe
+            $deleteStmt = $this->db->prepare("DELETE FROM packages WHERE id = :id");
+            $deleteStmt->execute([':id' => $packageId]);
+
+            if ($deleteStmt->rowCount() === 0) {
+                Response::json(404, "Package not found.");
+                return;
+            }
+
+            Response::json(200, "Package deleted successfully.");
+        } catch (Exception $e) {
+            error_log("Package Delete Error: " . $e->getMessage());
+            Response::json(500, "Internal Server Error: " . $e->getMessage());
+        }
+    }
     /**
      * POST /api/admin/packages/{id}/publish
      * Step 4b: Mark draft package as active and ready for booking

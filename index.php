@@ -104,8 +104,9 @@ $routes = [
 
     // Admin Bookings
     ['GET',    '/api/admin/bookings',                'AdminBookingController@index'],
-    ['PUT',    '/api/admin/bookings/status',         'AdminBookingController@updateStatus'],
+    ['PUT',    '/api/bookings/status',         'AdminBookingController@updateStatus'],
     ['GET',    '/api/admin/bookings/verify-paystack', 'AdminBookingController@verifyPaystack'],
+    // ['PUT',    '/api/bookings/status', 'AdminBookingController@verifyPaystack'],
 
     // Admin Media
     ['GET',    '/api/admin/media',                   'MediaController@index'],
@@ -119,8 +120,12 @@ $routes = [
     //packages
     // POST /api/admin/packages/{id}/photos
     // POST /api/admin/packages/{id}/publish
-    ['POST', '/api/admin/packages/{id}/photos', 'PackageController@uploadPhotos'],
+    ['POST', '/api/admin/packages/{id}/photos', 'PackageController@addPhotos'],
     ['POST', '/api/admin/packages/{id}/publish', 'PackageController@publishPackage'],
+
+    ['PUT', '/api/admin/packages/{id}', 'PackageController@updatePackage'],
+    ['PATCH', '/api/admin/packages/{id}/status', 'PackageController@updateStatus'],
+    ['DELETE', '/api/admin/packages/{id}', 'PackageController@deletePackage'],
 ];
 
 $routeMatched = false;

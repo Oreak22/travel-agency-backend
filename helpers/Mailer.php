@@ -296,4 +296,45 @@ HTML;
         </html>
         ";
     }
+    /**
+     * Render Template: Booking Cancellation Notification
+     */
+    public static function getCancellationTemplate($fullName, $bookingRef, $packageName)
+    {
+        $name    = htmlspecialchars($fullName, ENT_QUOTES, 'UTF-8');
+        $ref     = htmlspecialchars($bookingRef, ENT_QUOTES, 'UTF-8');
+        $package = htmlspecialchars($packageName, ENT_QUOTES, 'UTF-8');
+
+        return "
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body { font-family: Arial, sans-serif; background-color: #f4f6f8; color: #333; margin: 0; padding: 20px; }
+                .container { max-width: 600px; margin: 0 auto; background: #ffffff; padding: 30px; border-radius: 8px; border: 1px solid #e5e7eb; }
+                .warning-box { background: #fff1f2; border: 1px solid #fecdd3; color: #9f1239; padding: 15px; border-radius: 6px; margin: 20px 0; }
+                .footer { font-size: 12px; color: #6b7280; margin-top: 30px; border-top: 1px solid #e5e7eb; padding-top: 15px; }
+            </style>
+        </head>
+        <body>
+            <div class='container'>
+                <h2 style='color: #e11d48;'>Booking Cancelled</h2>
+                <p>Hi {$name},</p>
+                <p>Your reservation for <strong>{$package}</strong> (Reference: <strong>{$ref}</strong>) has been cancelled due to incomplete payment within the required timeframe.</p>
+                
+                <div class='warning-box'>
+                    <p style='margin:0; font-weight: bold;'>Reason: Payment Timeout / Cancellation</p>
+                    <p style='margin: 5px 0 0 0; font-size: 13px;'>The held seats have been restored back to the available package inventory.</p>
+                </div>
+
+                <p>If this was a mistake or you still wish to join this tour, please visit our package catalog to book a new slot.</p>
+                
+                <div class='footer'>
+                    <p>Travel Agency Support Team</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        ";
+    }
 }

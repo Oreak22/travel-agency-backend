@@ -5,6 +5,7 @@ require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../helpers/Response.php';
 require_once __DIR__ . '/../helpers/JWT.php';
 require_once __DIR__ . '/../middleware/auth.php';
+require_once __DIR__ . '/../helpers/Mailer.php';
 
 class BookingController
 {
@@ -21,6 +22,11 @@ class BookingController
      * Step 4.1: Atomic Transactional Booking Creation
      * Protected: Any Authenticated User
      */
+    /**
+     * POST /api/bookings
+     * Step 4.1: Atomic Transactional Booking Creation & Notification
+     * Protected: Any Authenticated User
+     */
     public function create()
     {
         // Guard Endpoint - Must be logged in
@@ -32,6 +38,7 @@ class BookingController
 
         if (!$input) {
             Response::json(400, "Invalid JSON payload provided.");
+            return;
         }
 
         $scheduleId = (int)($input['schedule_id'] ?? 0);
@@ -40,10 +47,12 @@ class BookingController
         // Basic Payload Validation
         if ($scheduleId <= 0) {
             Response::json(422, "Validation Error.", null, ['schedule_id' => "Valid schedule ID is required."]);
+            return;
         }
 
         if (!is_array($passengers) || empty($passengers)) {
             Response::json(422, "Validation Error.", null, ['passengers' => "At least one passenger record is required."]);
+            return;
         }
 
         $seatsRequested = count($passengers);
@@ -75,29 +84,46 @@ class BookingController
 
         if (!empty($passengerErrors)) {
             Response::json(422, "Validation Failed.", null, $passengerErrors);
+            return;
         }
 
         // --- BEGIN ATOMIC TRANSACTION ---
         try {
             $this->db->beginTransaction();
 
-            // 1. Lock Row for UPDATE to prevent race conditions
-            $lockSql = "SELECT id, available_seats, price, status 
-                        FROM package_schedules 
-                        WHERE id = :schedule_id AND status = 'open' 
+            // 1. Lock Schedule & JOIN Package and User details for details rendering
+            $lockSql = "SELECT 
+                            ps.id, 
+                            ps.available_seats, 
+                            ps.price, 
+                            ps.status,
+                            p.title as package_title,
+                            u.full_name as user_name,
+                            u.email as user_email
+                        FROM package_schedules ps
+                        JOIN packages p ON ps.package_id = p.id
+                        JOIN users u ON u.id = :user_id
+                        WHERE ps.id = :schedule_id AND ps.status = 'open' 
                         FOR UPDATE";
 
             $lockStmt = $this->db->prepare($lockSql);
-            $lockStmt->execute([':schedule_id' => $scheduleId]);
+            $lockStmt->execute([
+                ':schedule_id' => $scheduleId,
+                ':user_id'     => $userId
+            ]);
             $schedule = $lockStmt->fetch();
 
             if (!$schedule) {
                 $this->db->rollBack();
                 Response::json(404, "Schedule slot not found or no longer open for booking.");
+                return;
             }
 
             $availableSeats = (int)$schedule['available_seats'];
             $pricePerSeat   = (float)$schedule['price'];
+            $packageName    = $schedule['package_title'];
+            $userName       = $schedule['user_name'];
+            $userEmail      = $schedule['user_email'];
 
             // 2. Validate Available Capacity
             if ($availableSeats < $seatsRequested) {
@@ -106,6 +132,7 @@ class BookingController
                     'requested_seats' => $seatsRequested,
                     'available_seats' => $availableSeats
                 ]);
+                return;
             }
 
             // 3. Compute Total Amount & Generate Booking Reference
@@ -163,6 +190,14 @@ class BookingController
             // --- COMMIT TRANSACTION ---
             $this->db->commit();
 
+            // --- DISPATCH TRANSACTIONAL EMAIL ---
+            // Sent out of transaction thread so mail network delays don't block DB row locks
+            if (!empty($userEmail)) {
+                $subject  = "Booking Confirmation Details - [{$bookingReference}]";
+                $htmlBody = Mailer::getBookingReceiptTemplate($userName, $bookingReference, $packageName, $totalAmount);
+                Mailer::send($userEmail, $subject, $htmlBody);
+            }
+
             Response::json(201, "Booking successfully created. Pending payment.", [
                 'booking_id'        => $bookingId,
                 'booking_reference' => $bookingReference,
@@ -179,6 +214,12 @@ class BookingController
             Response::json(500, "Internal Server Error: Booking process could not be completed.");
         }
     }
+    /**
+   /**
+     * GET /api/bookings
+     * Step 4.2a: Retrieve booking history for authenticated user (or all bookings if admin/agent)
+     * Protected: All Authenticated Users
+     */
     /**
      * GET /api/bookings
      * Step 4.2a: Retrieve booking history for authenticated user (or all bookings if admin/agent)
@@ -219,7 +260,7 @@ class BookingController
             $countStmt->execute($params);
             $totalItems = (int)$countStmt->fetch()['total'];
 
-            // Query Bookings
+            // Query Bookings safely joining ONLY the latest payment record
             $sql = "SELECT 
                         b.id, 
                         b.booking_reference, 
@@ -231,11 +272,15 @@ class BookingController
                         ps.end_date, 
                         p.title as package_title,
                         u.full_name as booker_name,
-                        u.email as booker_email
+                        u.email as booker_email,
+                        pay.transaction_ref as payment_reference
                     FROM bookings b
                     JOIN package_schedules ps ON b.schedule_id = ps.id
                     JOIN packages p ON ps.package_id = p.id
                     JOIN users u ON b.user_id = u.id
+                    LEFT JOIN payments pay ON pay.id = (
+                        SELECT MAX(id) FROM payments WHERE booking_id = b.id
+                    )
                     {$whereSql}
                     ORDER BY b.id DESC
                     LIMIT :limit OFFSET :offset";
@@ -251,16 +296,21 @@ class BookingController
             $bookings = $stmt->fetchAll();
 
             $formattedBookings = array_map(function ($b) use ($userRole) {
+                // Generate secure JWT token for QR rendering
+                $ticketToken = JWT::generateTicketJwt($b);
+
                 $data = [
                     'id'                => (int)$b['id'],
                     'booking_reference' => $b['booking_reference'],
+                    'payment_reference' => $b['payment_reference'] ?? 'N/A',
                     'package_title'     => $b['package_title'],
                     'seats_booked'      => (int)$b['seats_booked'],
                     'total_amount'      => (float)$b['total_amount'],
                     'status'            => $b['booking_status'],
                     'start_date'        => $b['start_date'],
                     'end_date'          => $b['end_date'],
-                    'created_at'        => $b['created_at']
+                    'created_at'        => $b['created_at'],
+                    'ticket_token'      => $ticketToken // 👈 Added JWT payload string
                 ];
 
                 if ($userRole !== 'traveler') {
@@ -288,7 +338,25 @@ class BookingController
             Response::json(500, "Internal Server Error: Could not fetch bookings.");
         }
     }
+    // In BookingController.php
+    public function updateStatus()
+    {
+        $currentUser = AuthMiddleware::authenticate(['admin', 'agent']);
+        $input = json_decode(file_get_contents('php://input'), true);
 
+        $bookingId = (int)($input['booking_id'] ?? 0);
+        $status    = trim($input['status'] ?? '');
+
+        if ($bookingId <= 0 || !in_array($status, ['confirmed', 'pending', 'cancelled'], true)) {
+            Response::json(422, "Invalid payload or status value.");
+            return;
+        }
+
+        $stmt = $this->db->prepare("UPDATE bookings SET status = :status WHERE id = :id");
+        $stmt->execute([':status' => $status, ':id' => $bookingId]);
+
+        Response::json(200, "Booking status updated successfully.");
+    }
     /**
      * GET /api/bookings/{id}
      * Step 4.2b: Detailed booking lookup with passenger roster and payment logs
@@ -406,6 +474,10 @@ class BookingController
      * Step Gap B: Atomic Booking Cancellation & Seat Restoration
      * Protected: Owner or Admin/Agent
      */
+    /**
+     * PATCH /api/bookings/{id}/cancel
+     * Cancel booking, restore seat inventory, and notify traveler via email
+     */
     public function cancel($id)
     {
         $currentUser = AuthMiddleware::authenticate();
@@ -415,16 +487,29 @@ class BookingController
 
         if ($bookingId <= 0) {
             Response::json(400, "Invalid booking ID.");
+            return;
         }
 
         try {
             // --- BEGIN ATOMIC TRANSACTION ---
             $this->db->beginTransaction();
 
-            // 1. Fetch & Row-Lock Master Booking Record
-            $bookingSql = "SELECT id, user_id, schedule_id, seats_booked, status 
-                           FROM bookings 
-                           WHERE id = :id 
+            // 1. Fetch & Row-Lock Master Booking Record + JOIN User and Package details
+            $bookingSql = "SELECT 
+                            b.id, 
+                            b.user_id, 
+                            b.schedule_id, 
+                            b.seats_booked, 
+                            b.status, 
+                            b.booking_reference,
+                            u.full_name as user_name,
+                            u.email as user_email,
+                            p.title as package_title
+                           FROM bookings b
+                           JOIN users u ON b.user_id = u.id
+                           JOIN package_schedules ps ON b.schedule_id = ps.id
+                           JOIN packages p ON ps.package_id = p.id
+                           WHERE b.id = :id 
                            FOR UPDATE";
 
             $bookingStmt = $this->db->prepare($bookingSql);
@@ -434,22 +519,29 @@ class BookingController
             if (!$booking) {
                 $this->db->rollBack();
                 Response::json(404, "Booking record not found.");
+                return;
             }
 
             // Access Control Guard: Travelers can only cancel their own bookings
             if ($userRole === 'traveler' && (int)$booking['user_id'] !== $userId) {
                 $this->db->rollBack();
                 Response::json(403, "Forbidden: You do not have permission to cancel this booking.");
+                return;
             }
 
             // Idempotency Check: Already cancelled?
             if ($booking['status'] === 'cancelled') {
                 $this->db->rollBack();
                 Response::json(409, "Conflict: Booking is already cancelled.");
+                return;
             }
 
-            $scheduleId  = (int)$booking['schedule_id'];
+            $scheduleId     = (int)$booking['schedule_id'];
             $seatsToRestore = (int)$booking['seats_booked'];
+            $userEmail      = $booking['user_email'];
+            $userName       = $booking['user_name'];
+            $bookingRef     = $booking['booking_reference'];
+            $packageName    = $booking['package_title'];
 
             // 2. Lock & Fetch Target Package Schedule Row
             $schedSql = "SELECT id, total_seats, available_seats, status 
@@ -464,6 +556,7 @@ class BookingController
             if (!$schedule) {
                 $this->db->rollBack();
                 Response::json(404, "Associated package schedule slot not found.");
+                return;
             }
 
             $currentAvailable = (int)$schedule['available_seats'];
@@ -492,10 +585,17 @@ class BookingController
             // --- COMMIT TRANSACTION ---
             $this->db->commit();
 
+            // --- DISPATCH CANCELLATION EMAIL ---
+            if (!empty($userEmail)) {
+                $subject  = "Booking Cancellation Notice - [{$bookingRef}]";
+                $htmlBody = Mailer::getCancellationTemplate($userName, $bookingRef, $packageName);
+                Mailer::send($userEmail, $subject, $htmlBody);
+            }
+
             Response::json(200, "Booking successfully cancelled and seat inventory restored.", [
-                'booking_id'        => $bookingId,
-                'status'            => 'cancelled',
-                'seats_restored'    => $seatsToRestore,
+                'booking_id'          => $bookingId,
+                'status'              => 'cancelled',
+                'seats_restored'      => $seatsToRestore,
                 'new_available_seats' => $newAvailable
             ]);
         } catch (Exception $e) {
