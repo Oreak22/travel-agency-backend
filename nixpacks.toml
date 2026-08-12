@@ -3,6 +3,7 @@ providers = ["php"]
 
 [variables]
 NIXPACKS_PHP_ROOT_DIR = "."
+NIXPACKS_PHP_EXTENSIONS = "pdo, pdo_mysql, mysqli, mbstring, openssl"
 
 [start]
 cmd = "php -S 0.0.0.0:$PORT index.php"

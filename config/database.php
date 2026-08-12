@@ -20,15 +20,18 @@ class Database
 
         $dsn = "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4";
 
+        // Clean, deduplicated options array
         $options = [
             PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES   => false, // Forces native MySQL prepared statements
-            PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
         ];
 
         try {
             $this->conn = new PDO($dsn, $user, $pass, $options);
+
+            // Set charset and collation after connection setup to avoid constant error
+            $this->conn->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
         } catch (PDOException $e) {
             // Fail safely without leaking credentials in stack trace
             error_log("Database Connection Error: " . $e->getMessage());
