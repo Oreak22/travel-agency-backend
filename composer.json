@@ -1,5 +1,5 @@
 {
-  "name": "travel-agency-backend",
+  "name": "travel agency/backend",
   "description": "Travel Agency Backend API",
   "require": {
     "firebase/php-jwt": "^7.1",
