@@ -5,8 +5,10 @@ class EnvLoader
 {
     public static function load($path)
     {
+        // In production (e.g. Railway), .env won't exist.
+        // Return early so PHP falls back to getenv() / $_ENV from the system.
         if (!file_exists($path)) {
-            throw new Exception(".env file not found at " . $path);
+            return;
         }
 
         $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
