@@ -1,6 +1,4 @@
 {
-  "name": "travel agency/backend",
-  "description": "Travel Agency Backend API",
   "require": {
     "firebase/php-jwt": "^7.1",
     "mailgun/mailgun-php": "^4.5",
