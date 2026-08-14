@@ -37,7 +37,6 @@ class PackageController
         $whereClauses = ["1=1"];
         $params = [];
 
-        // If status filter is passed, use it; otherwise allow all statuses for admin views
         if ($status) {
             $whereClauses[] = "p.status = :status";
             $params[':status'] = $status;
@@ -77,6 +76,7 @@ class PackageController
             $countStmt->execute($params);
             $totalItems = (int)$countStmt->fetch(PDO::FETCH_ASSOC)['total'];
 
+            // Added subqueries for total_capacity and booked_seats
             $sql = "SELECT 
                         p.id, 
                         p.title, 
@@ -91,7 +91,17 @@ class PackageController
                             SELECT photo_url FROM package_photos 
                             WHERE package_id = p.id AND photo_type = 'cover' 
                             LIMIT 1
-                        ) as cover_photo
+                        ) as cover_photo,
+                        COALESCE((
+                            SELECT SUM(total_seats) 
+                            FROM package_schedules 
+                            WHERE package_id = p.id
+                        ), 30) as total_capacity,
+                        COALESCE((
+                            SELECT SUM(total_seats - available_seats) 
+                            FROM package_schedules 
+                            WHERE package_id = p.id
+                        ), 0) as booked_seats
                     FROM packages p
                     JOIN destinations d ON p.destination_id = d.id
                     WHERE {$whereSql}
@@ -111,18 +121,20 @@ class PackageController
 
             $formattedPackages = array_map(function ($item) {
                 return [
-                    'id'            => (int)$item['id'],
-                    'title'         => $item['title'],
-                    'description'   => $item['description'],
-                    'base_price'    => (float)$item['base_price'],
-                    'duration_days' => (int)$item['duration_days'],
-                    'status'        => $item['status'],
-                    'destination'   => [
+                    'id'             => (int)$item['id'],
+                    'title'          => $item['title'],
+                    'description'    => $item['description'],
+                    'base_price'     => (float)$item['base_price'],
+                    'duration_days'  => (int)$item['duration_days'],
+                    'status'         => $item['status'],
+                    'total_capacity' => (int)$item['total_capacity'],
+                    'booked_seats'   => (int)$item['booked_seats'],
+                    'destination'    => [
                         'id'      => (int)$item['destination_id'],
                         'name'    => $item['destination_name'],
                         'country' => $item['destination_country']
                     ],
-                    'cover_photo'   => $item['cover_photo'] ?: null
+                    'cover_photo'    => $item['cover_photo'] ?: null
                 ];
             }, $packages);
 
@@ -157,12 +169,12 @@ class PackageController
 
         try {
             $packageSql = "SELECT 
-                            p.id, p.title, p.description, p.base_price, p.duration_days, p.status, p.created_at,
-                            d.id as destination_id, d.city as destination_name, d.country as destination_country, d.description as destination_description
-                           FROM packages p
-                           JOIN destinations d ON p.destination_id = d.id
-                           WHERE p.id = :id AND p.status = 'active'
-                           LIMIT 1";
+                        p.id, p.title, p.description, p.base_price, p.duration_days, p.status, p.created_at,
+                        d.id as destination_id, d.city as destination_name, d.country as destination_country, d.description as destination_description
+                       FROM packages p
+                       JOIN destinations d ON p.destination_id = d.id
+                       WHERE p.id = :id AND p.status = 'active'
+                       LIMIT 1";
 
             $packageStmt = $this->db->prepare($packageSql);
             $packageStmt->execute([':id' => $packageId]);
@@ -173,30 +185,43 @@ class PackageController
                 return;
             }
 
+            // Fetch Schedules
             $scheduleSql = "SELECT id, start_date, end_date, total_seats, available_seats, price, status 
-                            FROM package_schedules 
-                            WHERE package_id = :package_id AND status = 'open' AND start_date >= CURDATE()
-                            ORDER BY start_date ASC";
+                        FROM package_schedules 
+                        WHERE package_id = :package_id AND status = 'open' AND start_date >= CURDATE()
+                        ORDER BY start_date ASC";
             $scheduleStmt = $this->db->prepare($scheduleSql);
             $scheduleStmt->execute([':package_id' => $packageId]);
             $schedules = $scheduleStmt->fetchAll(PDO::FETCH_ASSOC);
 
-            $formattedSchedules = array_map(function ($s) {
+            $totalCapacity = 0;
+            $bookedSeats = 0;
+
+            $formattedSchedules = array_map(function ($s) use (&$totalCapacity, &$bookedSeats) {
+                $total = (int)$s['total_seats'];
+                $available = (int)$s['available_seats'];
+                $booked = max(0, $total - $available);
+
+                $totalCapacity += $total;
+                $bookedSeats += $booked;
+
                 return [
                     'id'              => (int)$s['id'],
                     'start_date'      => $s['start_date'],
                     'end_date'        => $s['end_date'],
-                    'total_seats'     => (int)$s['total_seats'],
-                    'available_seats' => (int)$s['available_seats'],
+                    'total_seats'     => $total,
+                    'available_seats' => $available,
+                    'booked_seats'    => $booked,
                     'price'           => (float)$s['price'],
                     'status'          => $s['status']
                 ];
             }, $schedules);
 
+            // Fetch Itineraries
             $itinerarySql = "SELECT id, day_number, title, description, activity_location 
-                             FROM package_itineraries 
-                             WHERE package_id = :package_id 
-                             ORDER BY day_number ASC";
+                         FROM package_itineraries 
+                         WHERE package_id = :package_id 
+                         ORDER BY day_number ASC";
             $itineraryStmt = $this->db->prepare($itinerarySql);
             $itineraryStmt->execute([':package_id' => $packageId]);
             $itineraries = $itineraryStmt->fetchAll(PDO::FETCH_ASSOC);
@@ -211,10 +236,11 @@ class PackageController
                 ];
             }, $itineraries);
 
+            // Fetch Photos
             $photoSql = "SELECT id, photo_url, caption, photo_type, created_at 
-                         FROM package_photos 
-                         WHERE package_id = :package_id AND is_approved = 1 
-                         ORDER BY photo_type ASC, id DESC";
+                     FROM package_photos 
+                     WHERE package_id = :package_id AND is_approved = 1 
+                     ORDER BY photo_type ASC, id DESC";
             $photoStmt = $this->db->prepare($photoSql);
             $photoStmt->execute([':package_id' => $packageId]);
             $photos = $photoStmt->fetchAll(PDO::FETCH_ASSOC);
@@ -229,22 +255,26 @@ class PackageController
                 ];
             }, $photos);
 
+            // Construct Response Payload
             $responsePayload = [
-                'id'            => (int)$package['id'],
-                'title'         => $package['title'],
-                'description'   => $package['description'],
-                'base_price'    => (float)$package['base_price'],
-                'duration_days' => (int)$package['duration_days'],
-                'status'        => $package['status'],
-                'destination'   => [
+                'id'             => (int)$package['id'],
+                'title'          => $package['title'],
+                'description'    => $package['description'],
+                'base_price'     => (float)$package['base_price'],
+                'duration_days'  => (int)$package['duration_days'],
+                'status'         => $package['status'],
+                'total_capacity' => $totalCapacity,
+                'booked_seats'   => $bookedSeats,
+                'occupancy_rate' => $totalCapacity > 0 ? round(($bookedSeats / $totalCapacity) * 100, 2) : 0,
+                'destination'    => [
                     'id'          => (int)$package['destination_id'],
                     'name'        => $package['destination_name'],
                     'country'     => $package['destination_country'],
                     'description' => $package['destination_description']
                 ],
-                'schedules'     => $formattedSchedules,
-                'itineraries'   => $formattedItineraries,
-                'photos'        => $formattedPhotos
+                'schedules'      => $formattedSchedules,
+                'itineraries'    => $formattedItineraries,
+                'photos'         => $formattedPhotos
             ];
 
             Response::json(200, "Package details retrieved successfully.", $responsePayload);
