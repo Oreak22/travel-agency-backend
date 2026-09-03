@@ -214,12 +214,8 @@ class BookingController
             Response::json(500, "Internal Server Error: Booking process could not be completed.");
         }
     }
-    /**
-   /**
-     * GET /api/bookings
-     * Step 4.2a: Retrieve booking history for authenticated user (or all bookings if admin/agent)
-     * Protected: All Authenticated Users
-     */
+
+
     /**
      * GET /api/bookings
      * Step 4.2a: Retrieve booking history for authenticated user (or all bookings if admin/agent)
@@ -273,7 +269,14 @@ class BookingController
                         p.title as package_title,
                         u.full_name as booker_name,
                         u.email as booker_email,
-                        pay.transaction_ref as payment_reference
+                        pay.transaction_ref as payment_reference,
+                        (
+                            SELECT photo_url FROM package_photos WHERE package_id = p.id AND photo_type = 'cover' LIMIT 1
+                        ) as cover_photo,
+                        (
+                            SELECT status FROM payments WHERE booking_id = b.id ORDER BY id DESC LIMIT 1
+                        ) as latest_payment_status,
+                        COALESCE((SELECT SUM(amount) FROM payments WHERE booking_id = b.id AND status = 'paid'), 0) as amount_paid
                     FROM bookings b
                     JOIN package_schedules ps ON b.schedule_id = ps.id
                     JOIN packages p ON ps.package_id = p.id
@@ -303,7 +306,10 @@ class BookingController
                     'id'                => (int)$b['id'],
                     'booking_reference' => $b['booking_reference'],
                     'payment_reference' => $b['payment_reference'] ?? 'N/A',
+                    'payment_status'    => $b['latest_payment_status'] ?? null,
+                    'amount_paid'       => (float)($b['amount_paid'] ?? 0),
                     'package_title'     => $b['package_title'],
+                    'cover_photo'       => $b['cover_photo'] ?: null,
                     'seats_booked'      => (int)$b['seats_booked'],
                     'total_amount'      => (float)$b['total_amount'],
                     'status'            => $b['booking_status'],
@@ -379,7 +385,14 @@ class BookingController
                         b.id, b.booking_reference, b.user_id, b.seats_booked, b.total_amount, b.status as booking_status, b.created_at,
                         ps.start_date, ps.end_date, ps.price as seat_price,
                         p.id as package_id, p.title as package_title, p.description as package_description, p.duration_days,
-                        d.city as destination_name, d.country as destination_country
+                        d.city as destination_name, d.country as destination_country,
+                        (
+                            SELECT photo_url FROM package_photos WHERE package_id = p.id AND photo_type = 'cover' LIMIT 1
+                        ) as cover_photo,
+                        (
+                            SELECT status FROM payments WHERE booking_id = b.id ORDER BY id DESC LIMIT 1
+                        ) as latest_payment_status,
+                        COALESCE((SELECT SUM(amount) FROM payments WHERE booking_id = b.id AND status = 'paid'), 0) as amount_paid
                     FROM bookings b
                     JOIN package_schedules ps ON b.schedule_id = ps.id
                     JOIN packages p ON ps.package_id = p.id
@@ -446,12 +459,15 @@ class BookingController
                 'seats_booked'      => (int)$booking['seats_booked'],
                 'total_amount'      => (float)$booking['total_amount'],
                 'status'            => $booking['booking_status'],
+                'payment_status'    => $booking['latest_payment_status'] ?? null,
+                'amount_paid'       => (float)($booking['amount_paid'] ?? 0),
                 'created_at'        => $booking['created_at'],
                 'package'           => [
                     'id'            => (int)$booking['package_id'],
                     'title'         => $booking['package_title'],
                     'description'   => $booking['package_description'],
                     'duration_days' => (int)$booking['duration_days'],
+                    'cover_photo'   => $booking['cover_photo'] ?: null,
                     'destination'   => $booking['destination_name'] . ', ' . $booking['destination_country'],
                     'schedule'      => [
                         'start_date' => $booking['start_date'],
