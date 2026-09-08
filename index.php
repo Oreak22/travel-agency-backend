@@ -47,11 +47,16 @@ $routes = [
     ['GET',  '/',                  'HealthController@check'],
     ['GET',  '/api/health',        'HealthController@check'],
 
-    // Phase 2: Authentication Routes
-    ['POST', '/api/auth/register', 'AuthController@register'],
-    ['POST', '/api/auth/login',    'AuthController@login'],
-    ['GET',  '/api/auth/me',       'AuthController@me'], // Protected route
-
+    // Phase 2: Authentication & Profile Routes
+    ['POST', '/api/auth/register',            'AuthController@register'],
+    ['POST', '/api/auth/login',               'AuthController@login'],
+    ['POST', '/api/auth/google',              'AuthController@googleLogin'],
+    ['POST', '/api/auth/apple',               'AuthController@appleLogin'],
+    ['POST', '/api/auth/verify-email',        'AuthController@verifyEmail'],
+    ['GET',  '/api/auth/resend-verification', 'AuthController@resendVerification'],
+    ['GET',  '/api/auth/me',                  'AuthController@me'],
+    ['PUT',  '/api/auth/me',                  'AuthController@updateProfile'],
+    ['PUT',  '/api/auth/change-password',     'AuthController@changePassword'],
     // Phase 3: Packages & Catalog Routes
     ['GET',  '/api/packages',      'PackageController@index'],
     ['GET',  '/api/packages/{id}', 'PackageController@show'],
@@ -76,13 +81,6 @@ $routes = [
     // Booking Cancellation Route
     ['PATCH', '/api/bookings/{id}/cancel', 'BookingController@cancel'],
 
-    // Gap D: User Settings & Security Routes
-    ['PUT',  '/api/auth/me',              'AuthController@updateProfile'],
-    ['PUT',  '/api/auth/change-password', 'AuthController@changePassword'],
-
-    // Email Verification Routes
-    ['POST',  '/api/auth/verify-email',        'AuthController@verifyEmail'],
-    ['GET', '/api/auth/resend-verification', 'AuthController@resendVerification'],
 
     // Phase 6: Payment Engine Routes
     ['POST', '/api/payments/initialize',          'PaymentController@initialize'],

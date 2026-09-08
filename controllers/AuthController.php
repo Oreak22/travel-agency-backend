@@ -8,7 +8,6 @@ require_once __DIR__ . '/../middleware/auth.php';
 
 class AuthController
 {
-
     private $db;
 
     public function __construct()
@@ -97,6 +96,7 @@ class AuthController
             Response::json(500, "Internal Server Error: Unable to complete registration.");
         }
     }
+
     /**
      * GET /api/auth/verify-email?token={token}
      * Verify email address via cryptographic token
@@ -161,10 +161,7 @@ class AuthController
             Response::json(500, "Internal Server Error: Could not verify email.");
         }
     }
-    /**
-     * POST /api/auth/resend-verification
-     * Issue new verification token and email to unverified accounts
-     */
+
     private function enforceRateLimit(string $identifier, int $cooldownSeconds = 60, int $maxAttempts = 3, int $decaySeconds = 3600)
     {
         $now = date('Y-m-d H:i:s');
@@ -174,7 +171,7 @@ class AuthController
         FROM otp_rate_limits 
         WHERE identifier = :identifier AND action_type = 'resend_otp' 
         LIMIT 1
-    ");
+        ");
         $stmt->execute([':identifier' => $identifier]);
         $record = $stmt->fetch();
 
@@ -190,12 +187,11 @@ class AuthController
             }
 
             if ($elapsedWindow > $decaySeconds) {
-                // FIXED: Unique placeholders for each value
                 $resetStmt = $this->db->prepare("
                 UPDATE otp_rate_limits 
                 SET attempts = 1, last_attempt_at = :last_attempt_at, created_at = :created_at 
                 WHERE id = :id
-            ");
+                ");
                 $resetStmt->execute([
                     ':last_attempt_at' => $now,
                     ':created_at'      => $now,
@@ -213,17 +209,16 @@ class AuthController
             UPDATE otp_rate_limits 
             SET attempts = attempts + 1, last_attempt_at = :last_attempt_at 
             WHERE id = :id
-        ");
+            ");
             $updateStmt->execute([
                 ':last_attempt_at' => $now,
                 ':id'              => $record['id']
             ]);
         } else {
-            // FIXED: Unique placeholders for each value
             $insertStmt = $this->db->prepare("
             INSERT INTO otp_rate_limits (identifier, action_type, attempts, last_attempt_at, created_at) 
             VALUES (:identifier, 'resend_otp', 1, :last_attempt_at, :created_at)
-        ");
+            ");
             $insertStmt->execute([
                 ':identifier'      => $identifier,
                 ':last_attempt_at' => $now,
@@ -231,20 +226,19 @@ class AuthController
             ]);
         }
     }
+
+    /**
+     * POST /api/auth/resend-verification
+     * Issue new verification token and email to unverified accounts
+     */
     public function resendVerification()
     {
-        // $rawInput = file_get_contents('php://input');
-        // $input = json_decode($rawInput, true);
-        // Read email from $_GET parameter instead of JSON body
         $email = strtolower(trim($_GET['email'] ?? ''));
 
         if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             Response::json(422, "Validation Error: A valid email address is required.");
             return;
         }
-
-
-
 
         try {
             // Enforce Rate Limit: 60s cooldown, max 3 attempts per hour per email
@@ -265,21 +259,16 @@ class AuthController
                 return;
             }
 
-            // 1. Regenerate Secure 6-Digit OTP (10-minute expiration)
             $newOtp       = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
             $otpExpiresAt = date('Y-m-d H:i:s', strtotime('+10 minutes'));
 
-            // 2. Query with matching named placeholders
             $updateStmt = $this->db->prepare("UPDATE users SET otp = :otp, otp_expires_at = :otp_expires_at WHERE id = :id");
-
-            // 3. Array keys MUST match placeholders word-for-word
             $updateStmt->execute([
                 ':otp'            => $newOtp,
-                ':otp_expires_at' => $otpExpiresAt, // <-- Make sure this key matches :otp_expires_at above
+                ':otp_expires_at' => $otpExpiresAt,
                 ':id'             => $user['id']
             ]);
 
-            // Dispatch active mailer template
             $emailHtml = Mailer::getOtpVerificationTemplate($user['full_name'], $newOtp);
             Mailer::send($email, "New Email Verification Code - Travel Agency", $emailHtml);
 
@@ -291,11 +280,11 @@ class AuthController
                 return;
             }
 
-            // DEBUG OUTPUT: Displays exact error details in Postman response
             Response::json(500, "DEBUG: " . $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine());
             return;
         }
     }
+
     /**
      * Step 2.2: Authenticate User & Issue JWT
      * POST /api/auth/login
@@ -319,19 +308,16 @@ class AuthController
         }
 
         try {
-            // Fetch User by Email
-            $stmt = $this->db->prepare("SELECT id, full_name, email, password_hash, phone, role,is_email_verified FROM users WHERE email = :email LIMIT 1");
+            $stmt = $this->db->prepare("SELECT id, full_name, email, password_hash, phone, role, is_email_verified FROM users WHERE email = :email LIMIT 1");
             $stmt->execute([':email' => $email]);
             $user = $stmt->fetch();
 
-            // Verify Password Hash
             if (!$user || !password_verify($password, $user['password_hash'])) {
                 Response::json(401, "Invalid credentials.", null, [
                     'auth' => "The email or password provided is incorrect."
                 ]);
             }
 
-            // Issue JWT Token
             $tokenPayload = [
                 'sub'   => $user['id'],
                 'email' => $user['email'],
@@ -342,11 +328,11 @@ class AuthController
 
             Response::json(200, "Login successful.", [
                 'user' => [
-                    'id'        => (int) $user['id'],
-                    'full_name' => $user['full_name'],
-                    'email'     => $user['email'],
-                    'phone'     => $user['phone'],
-                    'role'      => $user['role'],
+                    'id'                => (int) $user['id'],
+                    'full_name'         => $user['full_name'],
+                    'email'             => $user['email'],
+                    'phone'             => $user['phone'],
+                    'role'              => $user['role'],
                     'is_email_verified' => (int) $user['is_email_verified']
                 ],
                 'token' => $token
@@ -358,12 +344,169 @@ class AuthController
     }
 
     /**
+     * POST /api/auth/google
+     * Handle Google Sign-In / Sign-Up
+     */
+    public function googleLogin()
+    {
+        $rawInput = file_get_contents('php://input');
+        $input = json_decode($rawInput, true);
+
+        $idToken = $input['id_token'] ?? '';
+
+        if (empty($idToken)) {
+            Response::json(400, "Google ID token is required.");
+        }
+
+        try {
+            // Validate the token via Google's endpoint
+            // Note: In production, consider using the official google/apiclient library.
+            $verifyUrl = "https://oauth2.googleapis.com/tokeninfo?id_token=" . urlencode($idToken);
+            $response = @file_get_contents($verifyUrl);
+            $payload = $response ? json_decode($response, true) : null;
+
+            if (!$payload || isset($payload['error']) || empty($payload['email'])) {
+                Response::json(401, "Invalid or expired Google ID token.");
+            }
+
+            // Optional: verify the token was intended for your app
+            // if (isset($payload['aud']) && $payload['aud'] !== 'YOUR_GOOGLE_CLIENT_ID') { ... }
+
+            $email = strtolower(trim($payload['email']));
+            $fullName = $payload['name'] ?? 'Google User';
+
+            // Pass to the shared OAuth handler
+            $this->handleOAuthUser($email, $fullName);
+        } catch (Exception $e) {
+            error_log("Google OAuth Exception: " . $e->getMessage());
+            Response::json(500, "Internal Server Error: Unable to authenticate with Google.");
+        }
+    }
+
+    /**
+     * POST /api/auth/apple
+     * Handle Apple Sign-In / Sign-Up
+     */
+    public function appleLogin()
+    {
+        $rawInput = file_get_contents('php://input');
+        $input = json_decode($rawInput, true);
+
+        $identityToken = $input['identity_token'] ?? '';
+
+        // IMPORTANT: Apple only sends the user's name on their VERY FIRST sign-in. 
+        // Your frontend needs to capture it and pass it to this endpoint as 'full_name'
+        $clientProvidedName = $input['full_name'] ?? null;
+
+        if (empty($identityToken)) {
+            Response::json(400, "Apple identity token is required.");
+        }
+
+        try {
+            // Parse Apple JWT payload
+            // Note: In production, you MUST verify the RSA signature using Apple's JWKS (https://appleid.apple.com/auth/keys)
+            $tokenParts = explode('.', $identityToken);
+            if (count($tokenParts) !== 3) {
+                Response::json(400, "Invalid Apple identity token format.");
+            }
+
+            // Decode the payload part of the JWT
+            $payloadBase64 = str_replace(['-', '_'], ['+', '/'], $tokenParts[1]);
+            $payload = json_decode(base64_decode($payloadBase64), true);
+
+            if (!$payload || empty($payload['email'])) {
+                Response::json(401, "Invalid Apple identity token payload.");
+            }
+
+            $email = strtolower(trim($payload['email']));
+            $fullName = $clientProvidedName ?: 'Apple User';
+
+            // Pass to the shared OAuth handler
+            $this->handleOAuthUser($email, $fullName);
+        } catch (Exception $e) {
+            error_log("Apple OAuth Exception: " . $e->getMessage());
+            Response::json(500, "Internal Server Error: Unable to authenticate with Apple.");
+        }
+    }
+
+    /**
+     * Shared logic to process OAuth Users (Google & Apple)
+     */
+    private function handleOAuthUser(string $email, string $fullName)
+    {
+        try {
+            $stmt = $this->db->prepare("SELECT id, full_name, email, phone, role, is_email_verified FROM users WHERE email = :email LIMIT 1");
+            $stmt->execute([':email' => $email]);
+            $user = $stmt->fetch();
+
+            if (!$user) {
+                // User doesn't exist -> Register them
+                // Generate a random high-entropy password since they won't use it to log in
+                $randomPassword = bin2hex(random_bytes(16));
+                $passwordHash = password_hash($randomPassword, PASSWORD_BCRYPT, ['cost' => 12]);
+
+                $sql = "INSERT INTO users (full_name, email, password_hash, role, is_email_verified) 
+                        VALUES (:full_name, :email, :password_hash, 'traveler', 1)";
+
+                $insertStmt = $this->db->prepare($sql);
+                $insertStmt->execute([
+                    ':full_name'     => $fullName,
+                    ':email'         => $email,
+                    ':password_hash' => $passwordHash
+                ]);
+
+                $userId = (int)$this->db->lastInsertId();
+
+                $user = [
+                    'id'                => $userId,
+                    'full_name'         => $fullName,
+                    'email'             => $email,
+                    'phone'             => null,
+                    'role'              => 'traveler',
+                    'is_email_verified' => 1
+                ];
+            } else {
+                // User exists. If they started regular registration previously but didn't verify their email,
+                // OAuth implicitly verifies it for them.
+                if ((int)$user['is_email_verified'] === 0) {
+                    $updateStmt = $this->db->prepare("UPDATE users SET is_email_verified = 1, otp = NULL, otp_expires_at = NULL WHERE id = :id");
+                    $updateStmt->execute([':id' => $user['id']]);
+                    $user['is_email_verified'] = 1;
+                }
+            }
+
+            // Issue your platform's standard JWT token
+            $tokenPayload = [
+                'sub'   => $user['id'],
+                'email' => $user['email'],
+                'role'  => $user['role'],
+                'name'  => $user['full_name']
+            ];
+            $token = JWT::encode($tokenPayload);
+
+            Response::json(200, "OAuth authentication successful.", [
+                'user' => [
+                    'id'                => (int) $user['id'],
+                    'full_name'         => $user['full_name'],
+                    'email'             => $user['email'],
+                    'phone'             => $user['phone'],
+                    'role'              => $user['role'],
+                    'is_email_verified' => (int) $user['is_email_verified']
+                ],
+                'token' => $token
+            ]);
+        } catch (Exception $e) {
+            error_log("Handle OAuth Exception: " . $e->getMessage());
+            Response::json(500, "Internal Server Error: Unable to complete OAuth sign-in.");
+        }
+    }
+
+    /**
      * Step 2.3: Fetch Authenticated User Profile
      * GET /api/auth/me
      */
     public function me()
     {
-        // Guard Route using AuthMiddleware (Accepts any valid authenticated role)
         $currentUser = AuthMiddleware::authenticate();
 
         try {
@@ -377,11 +520,11 @@ class AuthController
 
             Response::json(200, "User profile retrieved successfully.", [
                 'user' => [
-                    'id'         => (int) $user['id'],
-                    'full_name'  => $user['full_name'],
-                    'email'      => $user['email'],
-                    'phone'      => $user['phone'],
-                    'role'       => $user['role'],
+                    'id'                => (int) $user['id'],
+                    'full_name'         => $user['full_name'],
+                    'email'             => $user['email'],
+                    'phone'             => $user['phone'],
+                    'role'              => $user['role'],
                     'is_email_verified' => (int) $user['is_email_verified']
                 ]
             ]);
@@ -390,10 +533,9 @@ class AuthController
             Response::json(500, "Internal Server Error: Unable to fetch profile.");
         }
     }
+
     /**
      * PUT /api/auth/me
-     * Gap D1: Update Profile Details (Full Name & Phone)
-     * Protected: All Authenticated Users
      */
     public function updateProfile()
     {
@@ -423,7 +565,6 @@ class AuthController
         }
 
         try {
-            // Build dynamic UPDATE query
             $fields = [];
             $params = [':id' => $userId];
 
@@ -444,7 +585,6 @@ class AuthController
             $stmt = $this->db->prepare($sql);
             $stmt->execute($params);
 
-            // Fetch refreshed profile data
             $userStmt = $this->db->prepare("SELECT id, full_name, email, phone, role, created_at FROM users WHERE id = :id LIMIT 1");
             $userStmt->execute([':id' => $userId]);
             $updatedUser = $userStmt->fetch();
@@ -467,8 +607,6 @@ class AuthController
 
     /**
      * PUT /api/auth/change-password
-     * Gap D2: Secure Password Rotation with Old Password Verification
-     * Protected: All Authenticated Users
      */
     public function changePassword()
     {
@@ -498,7 +636,6 @@ class AuthController
         }
 
         try {
-            // Fetch stored password hash
             $stmt = $this->db->prepare("SELECT password_hash FROM users WHERE id = :id LIMIT 1");
             $stmt->execute([':id' => $userId]);
             $user = $stmt->fetch();
@@ -507,12 +644,10 @@ class AuthController
                 Response::json(401, "Authentication failed: Incorrect current password.");
             }
 
-            // Prevent re-using identical password
             if (password_verify($newPassword, $user['password_hash'])) {
                 Response::json(422, "Validation Error: New password cannot be identical to the current password.");
             }
 
-            // Generate new Bcrypt Hash (Cost: 12)
             $newPasswordHash = password_hash($newPassword, PASSWORD_BCRYPT, ['cost' => 12]);
 
             $updateStmt = $this->db->prepare("UPDATE users SET password_hash = :hash WHERE id = :id");
